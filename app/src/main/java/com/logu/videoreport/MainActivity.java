@@ -5,7 +5,6 @@ import android.os.*;
 import android.content.*;
 import android.graphics.Color;
 import android.net.Uri;
-import android.provider.DocumentsContract;
 import android.provider.MediaStore;
 import android.view.*;
 import android.widget.*;
@@ -15,13 +14,18 @@ import java.text.SimpleDateFormat;
 import java.util.*;
 
 public class MainActivity extends Activity {
-    static final int REQ_RECORD = 11, REQ_PICK = 12, REQ_FOLDER = 13;
+    static final int REQ_RECORD = 11;
+    static final int REQ_PICK = 12;
+    static final int REQ_RECORD_DEST = 13;
+    static final int REQ_PICK_DEST = 14;
 
     EditText empNo, empName, unit, line, remarks;
     Spinner operation;
-    TextView machine, videoLabel, driveLabel;
-    Uri videoUri, cameraUri;
+    TextView machine, videoLabel;
+    Uri videoUri;
+    Uri pendingPickedVideo;
     boolean videoStoredInDrive=false;
+    boolean pendingSubmitAfterDriveSave=false;
     SharedPreferences prefs;
 
     final String[] operations = {
@@ -39,14 +43,17 @@ public class MainActivity extends Activity {
 
     TextView title(String s,int size){
         TextView v=new TextView(this);
-        v.setText(s); v.setTextSize(size); v.setTextColor(Color.rgb(25,35,50));
+        v.setText(s);
+        v.setTextSize(size);
+        v.setTextColor(Color.rgb(25,35,50));
         v.setPadding(0,12,0,8);
         return v;
     }
 
     EditText field(String hint){
         EditText e=new EditText(this);
-        e.setHint(hint); e.setSingleLine(true);
+        e.setHint(hint);
+        e.setSingleLine(true);
         return e;
     }
 
@@ -71,27 +78,32 @@ public class MainActivity extends Activity {
 
     void showForm(){
         videoUri=null;
-        cameraUri=null;
+        pendingPickedVideo=null;
         videoStoredInDrive=false;
+        pendingSubmitAfterDriveSave=false;
 
         LinearLayout r=root();
-        TextView h=title("VIDEO REPORT - DRIVE VERSION",24);
+
+        TextView h=title("VIDEO REPORT - GOOGLE DRIVE",24);
         h.setTextColor(Color.rgb(31,111,235));
         r.addView(h);
 
-        r.addView(title("Google Drive Storage",18));
-        driveLabel=title(prefs.contains("driveFolder") ? "Google Drive folder selected ✓" : "No Google Drive folder selected",14);
-        r.addView(driveLabel);
-        Button chooseFolder=button("SELECT GOOGLE DRIVE FOLDER");
-        chooseFolder.setOnClickListener(v->selectDriveFolder());
-        r.addView(chooseFolder);
+        TextView info=title(
+            "Record: choose Google Drive on the Save screen, then record.\n" +
+            "Choose Video: select an existing video; on Submit you can save a copy to Google Drive.",
+            14
+        );
+        r.addView(info);
 
         r.addView(title("Employee Details",18));
         empNo=field("Emp No");
         empName=field("Employee Name");
         unit=field("Unit");
         line=field("Line No");
-        r.addView(empNo); r.addView(empName); r.addView(unit); r.addView(line);
+        r.addView(empNo);
+        r.addView(empName);
+        r.addView(unit);
+        r.addView(line);
 
         r.addView(title("Operation Details",18));
         operation=new Spinner(this);
@@ -119,21 +131,24 @@ public class MainActivity extends Activity {
 
         LinearLayout row=new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        Button record=button("RECORD VIDEO");
+
+        Button record=button("RECORD → DRIVE");
         Button pick=button("CHOOSE VIDEO");
+
         row.addView(record,new LinearLayout.LayoutParams(0,-2,1));
         row.addView(pick,new LinearLayout.LayoutParams(0,-2,1));
         r.addView(row);
 
-        record.setOnClickListener(v->recordVideo());
+        record.setOnClickListener(v->chooseDriveDestinationForRecording());
         pick.setOnClickListener(v->pickVideo());
 
         Button submit=button("SUBMIT REPORT");
-        submit.setOnClickListener(v->uploadAndSave());
+        submit.setOnClickListener(v->submitReport());
         r.addView(submit);
 
         int count=0;
         try{ count=new JSONArray(prefs.getString("list","[]")).length(); }catch(Exception ignored){}
+
         Button history=button("VIEW REPORT HISTORY ("+count+")");
         history.setOnClickListener(v->showHistory());
         r.addView(history);
@@ -148,41 +163,42 @@ public class MainActivity extends Activity {
         return "SPECIAL MACHINE";
     }
 
-    void selectDriveFolder(){
-        Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+    String makeVideoFileName(){
+        String eno=empNo==null ? "" : empNo.getText().toString().trim();
+        String ename=empName==null ? "" : empName.getText().toString().trim();
+        String prefix=eno.isEmpty() ? "VideoReport" : eno;
+        if(!ename.isEmpty()) prefix+="_"+ename.replaceAll("[^a-zA-Z0-9_-]","_");
+        String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.getDefault()).format(new Date());
+        return prefix+"_"+stamp+".mp4";
+    }
+
+    void chooseDriveDestinationForRecording(){
+        Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("video/mp4");
+        i.putExtra(Intent.EXTRA_TITLE,makeVideoFileName());
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
-                   Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION |
-                   Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        startActivityForResult(i,REQ_FOLDER);
+                   Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(i,REQ_RECORD_DEST);
     }
 
     void pickVideo(){
         Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.setType("video/*");
         i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                   Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         startActivityForResult(i,REQ_PICK);
     }
 
-    void recordVideo(){
-        String folder=prefs.getString("driveFolder","");
-        if(folder.isEmpty()){
-            Toast.makeText(this,"First select your Google Drive folder",Toast.LENGTH_LONG).show();
-            selectDriveFolder();
-            return;
-        }
+    void launchCameraToUri(Uri dest){
         try{
-            ContentValues values=new ContentValues();
-            values.put(MediaStore.Video.Media.DISPLAY_NAME,"VideoReport_"+System.currentTimeMillis()+".mp4");
-            values.put(MediaStore.Video.Media.MIME_TYPE,"video/mp4");
-            if(Build.VERSION.SDK_INT>=29) values.put(MediaStore.Video.Media.RELATIVE_PATH,"Movies/VideoReport");
-            cameraUri=getContentResolver().insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,values);
-            if(cameraUri==null) throw new Exception("Could not create video file");
-
             Intent i=new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
-            i.putExtra(MediaStore.EXTRA_OUTPUT,cameraUri);
-            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            i.putExtra(MediaStore.EXTRA_OUTPUT,dest);
+            i.setClipData(ClipData.newRawUri("video",dest));
+            i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                       Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivityForResult(i,REQ_RECORD);
         }catch(Exception e){
             Toast.makeText(this,"Unable to open camera: "+e.getMessage(),Toast.LENGTH_LONG).show();
@@ -192,192 +208,205 @@ public class MainActivity extends Activity {
     @Override protected void onActivityResult(int req,int res,Intent data){
         super.onActivityResult(req,res,data);
 
-        if(req==REQ_FOLDER && res==RESULT_OK && data!=null && data.getData()!=null){
-            Uri tree=data.getData();
-            int flags=data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-            try{ getContentResolver().takePersistableUriPermission(tree,flags); }catch(Exception ignored){}
-            prefs.edit().putString("driveFolder",tree.toString()).apply();
-            if(driveLabel!=null) driveLabel.setText("Google Drive folder selected ✓");
-            Toast.makeText(this,"Drive folder saved",Toast.LENGTH_SHORT).show();
-            return;
-        }
-
-        if(req==REQ_PICK && res==RESULT_OK && data!=null && data.getData()!=null){
-            videoUri=data.getData();
-            videoStoredInDrive=false;
-            try{ getContentResolver().takePersistableUriPermission(videoUri,Intent.FLAG_GRANT_READ_URI_PERMISSION); }catch(Exception ignored){}
-            if(videoLabel!=null) videoLabel.setText("Video selected - will upload on Submit");
+        if(req==REQ_RECORD_DEST){
+            if(res==RESULT_OK && data!=null && data.getData()!=null){
+                Uri dest=data.getData();
+                persistUriPermission(data,dest,true);
+                videoUri=dest;
+                videoStoredInDrive=isLikelyGoogleDriveUri(dest);
+                if(videoLabel!=null){
+                    videoLabel.setText(videoStoredInDrive
+                        ? "Google Drive selected - opening camera..."
+                        : "Save location selected - opening camera...");
+                }
+                launchCameraToUri(dest);
+            }
             return;
         }
 
         if(req==REQ_RECORD){
-            if(res==RESULT_OK && cameraUri!=null){
-                uploadRecordedVideoToDrive(cameraUri);
-            }else if(cameraUri!=null){
-                try{ getContentResolver().delete(cameraUri,null,null); }catch(Exception ignored){}
-                cameraUri=null;
+            if(res==RESULT_OK && videoUri!=null){
+                if(videoLabel!=null){
+                    videoLabel.setText(videoStoredInDrive
+                        ? "Recorded directly to Google Drive ✓"
+                        : "Recorded to selected save location ✓");
+                }
+                Toast.makeText(this,
+                    videoStoredInDrive ? "Recording saved to Google Drive ✓" : "Recording saved ✓",
+                    Toast.LENGTH_LONG).show();
+            }else{
+                videoUri=null;
+                videoStoredInDrive=false;
+                if(videoLabel!=null) videoLabel.setText("Recording cancelled");
             }
-        }
-    }
-
-    void uploadRecordedVideoToDrive(Uri localVideo){
-        final String folder=prefs.getString("driveFolder","");
-        if(folder.isEmpty()){
-            Toast.makeText(this,"Drive folder not selected",Toast.LENGTH_LONG).show();
             return;
         }
 
-        final ProgressDialog pd=new ProgressDialog(this);
-        pd.setTitle("Saving recording to Google Drive");
-        pd.setMessage("Uploading recorded video...");
-        pd.setCancelable(false);
-        pd.show();
-
-        new Thread(()->{
-            try{
-                String eno=empNo==null ? "" : empNo.getText().toString().trim();
-                String ename=empName==null ? "" : empName.getText().toString().trim();
-                String prefix=(eno.isEmpty() ? "Recorded" : eno);
-                if(!ename.isEmpty()) prefix+="_"+ename.replaceAll("[^a-zA-Z0-9_-]","_");
-                String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.getDefault()).format(new Date());
-                Uri driveUri=copyVideoToDrive(localVideo,Uri.parse(folder),prefix+"_"+stamp+".mp4");
-
-                try{ getContentResolver().delete(localVideo,null,null); }catch(Exception ignored){}
-
-                videoUri=driveUri;
-                videoStoredInDrive=true;
-                cameraUri=null;
-
-                runOnUiThread(()->{
-                    pd.dismiss();
-                    if(videoLabel!=null) videoLabel.setText("Recorded video saved to Google Drive ✓");
-                    Toast.makeText(this,"Recording saved to Google Drive ✓",Toast.LENGTH_LONG).show();
-                });
-            }catch(Exception e){
-                runOnUiThread(()->{
-                    pd.dismiss();
-                    videoUri=localVideo;
-                    videoStoredInDrive=false;
-                    if(videoLabel!=null) videoLabel.setText("Drive upload failed - local recording kept");
-                    Toast.makeText(this,"Drive upload failed: "+e.getMessage(),Toast.LENGTH_LONG).show();
-                });
+        if(req==REQ_PICK){
+            if(res==RESULT_OK && data!=null && data.getData()!=null){
+                videoUri=data.getData();
+                pendingPickedVideo=videoUri;
+                videoStoredInDrive=isLikelyGoogleDriveUri(videoUri);
+                persistUriPermission(data,videoUri,false);
+                if(videoLabel!=null){
+                    videoLabel.setText(videoStoredInDrive
+                        ? "Google Drive video selected ✓"
+                        : "Video selected - will save to Drive on Submit");
+                }
             }
-        }).start();
+            return;
+        }
+
+        if(req==REQ_PICK_DEST){
+            if(res==RESULT_OK && data!=null && data.getData()!=null && pendingPickedVideo!=null){
+                Uri dest=data.getData();
+                persistUriPermission(data,dest,true);
+                copyPickedVideoThenSubmit(pendingPickedVideo,dest);
+            }else{
+                pendingSubmitAfterDriveSave=false;
+                Toast.makeText(this,"Google Drive save cancelled",Toast.LENGTH_SHORT).show();
+            }
+        }
     }
 
-    void uploadAndSave(){
-        final String eno=empNo.getText().toString().trim();
-        final String ename=empName.getText().toString().trim();
-        final String eunit=unit.getText().toString().trim();
-        final String eline=line.getText().toString().trim();
-        final String eremarks=remarks.getText().toString().trim();
-        final int op=operation.getSelectedItemPosition();
+    void persistUriPermission(Intent data,Uri uri,boolean write){
+        int wanted=Intent.FLAG_GRANT_READ_URI_PERMISSION;
+        if(write) wanted|=Intent.FLAG_GRANT_WRITE_URI_PERMISSION;
+        int flags=data.getFlags() & wanted;
+        try{
+            if(flags!=0) getContentResolver().takePersistableUriPermission(uri,flags);
+        }catch(Exception ignored){}
+    }
+
+    boolean isLikelyGoogleDriveUri(Uri uri){
+        if(uri==null) return false;
+        String a=uri.getAuthority();
+        String s=uri.toString().toLowerCase(Locale.ROOT);
+        return (a!=null && a.toLowerCase(Locale.ROOT).contains("google")) ||
+               s.contains("com.google.android.apps.docs") ||
+               s.contains("google.drive") ||
+               s.contains("drive");
+    }
+
+    void submitReport(){
+        String eno=empNo.getText().toString().trim();
+        String ename=empName.getText().toString().trim();
 
         if(eno.isEmpty() || ename.isEmpty()){
             Toast.makeText(this,"Enter Emp No and Employee Name",Toast.LENGTH_SHORT).show();
             return;
         }
+
         if(videoUri==null){
             Toast.makeText(this,"Please record or choose a video",Toast.LENGTH_SHORT).show();
             return;
         }
 
-        final String folder=prefs.getString("driveFolder","");
-        if(folder.isEmpty()){
-            Toast.makeText(this,"First select your Google Drive folder",Toast.LENGTH_LONG).show();
-            selectDriveFolder();
+        if(videoStoredInDrive || isLikelyGoogleDriveUri(videoUri)){
+            saveCurrentReport(videoUri,"Google Drive");
             return;
         }
 
-        if(videoStoredInDrive){
-            try{
-                saveReportRecord(eno,ename,eunit,eline,eremarks,op,videoUri);
-                Toast.makeText(this,"Report saved ✓",Toast.LENGTH_LONG).show();
-                showHistory();
-            }catch(Exception e){
-                Toast.makeText(this,"Could not save report: "+e.getMessage(),Toast.LENGTH_LONG).show();
-            }
-            return;
-        }
+        pendingPickedVideo=videoUri;
+        pendingSubmitAfterDriveSave=true;
 
-        final Uri src=videoUri;
+        Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("video/mp4");
+        i.putExtra(Intent.EXTRA_TITLE,makeVideoFileName());
+        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                   Intent.FLAG_GRANT_WRITE_URI_PERMISSION |
+                   Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        Toast.makeText(this,"Choose Google Drive in the Save screen",Toast.LENGTH_LONG).show();
+        startActivityForResult(i,REQ_PICK_DEST);
+    }
+
+    void copyPickedVideoThenSubmit(Uri source,Uri dest){
         final ProgressDialog pd=new ProgressDialog(this);
-        pd.setTitle("Uploading to Google Drive");
-        pd.setMessage("Uploading selected video...");
+        pd.setTitle("Saving video");
+        pd.setMessage("Copying video to selected location...");
         pd.setCancelable(false);
         pd.show();
 
         new Thread(()->{
             try{
-                String safeName=ename.replaceAll("[^a-zA-Z0-9_-]","_");
-                String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.getDefault()).format(new Date());
-                String fileName=eno+"_"+safeName+"_"+stamp+".mp4";
-                Uri driveUri=copyVideoToDrive(src,Uri.parse(folder),fileName);
-                saveReportRecord(eno,ename,eunit,eline,eremarks,op,driveUri);
-
+                copyUri(source,dest);
+                videoUri=dest;
+                videoStoredInDrive=isLikelyGoogleDriveUri(dest);
                 runOnUiThread(()->{
                     pd.dismiss();
-                    Toast.makeText(this,"Video uploaded & report saved ✓",Toast.LENGTH_LONG).show();
-                    showHistory();
+                    if(videoLabel!=null){
+                        videoLabel.setText(videoStoredInDrive
+                            ? "Video saved to Google Drive ✓"
+                            : "Video saved to selected location ✓");
+                    }
+                    if(pendingSubmitAfterDriveSave){
+                        pendingSubmitAfterDriveSave=false;
+                        saveCurrentReport(dest,videoStoredInDrive ? "Google Drive" : "Selected storage");
+                    }
                 });
             }catch(Exception e){
                 runOnUiThread(()->{
                     pd.dismiss();
-                    Toast.makeText(this,"Upload failed: "+e.getMessage(),Toast.LENGTH_LONG).show();
+                    pendingSubmitAfterDriveSave=false;
+                    Toast.makeText(this,"Could not save video: "+e.getMessage(),Toast.LENGTH_LONG).show();
                 });
             }
         }).start();
     }
 
-    void saveReportRecord(String eno,String ename,String eunit,String eline,String eremarks,int op,Uri driveUri) throws Exception{
-        JSONObject o=new JSONObject();
-        o.put("empNo",eno);
-        o.put("name",ename);
-        o.put("unit",eunit);
-        o.put("line",eline);
-        o.put("operation",operations[op]);
-        o.put("machine",machineFor(op));
-        o.put("remarks",eremarks);
-        o.put("date",new SimpleDateFormat("dd-MM-yyyy HH:mm",Locale.getDefault()).format(new Date()));
-        o.put("video",driveUri.toString());
-        o.put("storage","Google Drive");
-
-        synchronized(MainActivity.class){
-            JSONArray arr=new JSONArray(prefs.getString("list","[]"));
-            arr.put(o);
-            prefs.edit().putString("list",arr.toString()).commit();
-        }
-    }
-
-    Uri copyVideoToDrive(Uri source,Uri treeUri,String fileName) throws Exception{
-        String treeId=DocumentsContract.getTreeDocumentId(treeUri);
-        Uri parent=DocumentsContract.buildDocumentUriUsingTree(treeUri,treeId);
-        String mime=getContentResolver().getType(source);
-        if(mime==null || !mime.startsWith("video/")) mime="video/mp4";
-
-        Uri dest=DocumentsContract.createDocument(getContentResolver(),parent,mime,fileName);
-        if(dest==null) throw new IOException("Could not create file in selected Drive folder");
-
+    void copyUri(Uri source,Uri dest) throws Exception{
         try(InputStream in=getContentResolver().openInputStream(source);
             OutputStream out=getContentResolver().openOutputStream(dest,"w")){
-            if(in==null || out==null) throw new IOException("Could not open video stream");
+            if(in==null || out==null) throw new IOException("Could not open video");
             byte[] buf=new byte[1024*64];
             int n;
             while((n=in.read(buf))>0) out.write(buf,0,n);
             out.flush();
-        }catch(Exception e){
-            try{ DocumentsContract.deleteDocument(getContentResolver(),dest); }catch(Exception ignored){}
-            throw e;
         }
-        return dest;
+    }
+
+    void saveCurrentReport(Uri storedVideo,String storage){
+        try{
+            String eno=empNo.getText().toString().trim();
+            String ename=empName.getText().toString().trim();
+            String eunit=unit.getText().toString().trim();
+            String eline=line.getText().toString().trim();
+            String eremarks=remarks.getText().toString().trim();
+            int op=operation.getSelectedItemPosition();
+
+            JSONObject o=new JSONObject();
+            o.put("empNo",eno);
+            o.put("name",ename);
+            o.put("unit",eunit);
+            o.put("line",eline);
+            o.put("operation",operations[op]);
+            o.put("machine",machineFor(op));
+            o.put("remarks",eremarks);
+            o.put("date",new SimpleDateFormat("dd-MM-yyyy HH:mm",Locale.getDefault()).format(new Date()));
+            o.put("video",storedVideo.toString());
+            o.put("storage",storage);
+
+            synchronized(MainActivity.class){
+                JSONArray arr=new JSONArray(prefs.getString("list","[]"));
+                arr.put(o);
+                prefs.edit().putString("list",arr.toString()).commit();
+            }
+
+            Toast.makeText(this,"Report saved ✓",Toast.LENGTH_LONG).show();
+            showHistory();
+        }catch(Exception e){
+            Toast.makeText(this,"Could not save report: "+e.getMessage(),Toast.LENGTH_LONG).show();
+        }
     }
 
     void showHistory(){
-        showHistory(prefs.getString("sortMode","Newest"));
+        showHistory(prefs.getString("sortMode","Date - Newest First"));
     }
 
     void showHistory(String sortMode){
         LinearLayout r=root();
+
         Button back=button("← ADD NEW REPORT");
         back.setOnClickListener(v->showForm());
         r.addView(back);
@@ -388,50 +417,97 @@ public class MainActivity extends Activity {
             JSONArray arr=new JSONArray(prefs.getString("list","[]"));
             r.addView(title("Total reports: "+arr.length(),15));
 
-            final String[] sortOptions={"Newest","Oldest","Emp No","Name","Unit","Line","Operation","Machine"};
+            final String[] sortOptions={
+                "Date - Newest First",
+                "Date - Oldest First",
+                "Emp No - Low to High",
+                "Emp No - High to Low",
+                "Name - A to Z",
+                "Name - Z to A",
+                "Unit - Low to High",
+                "Unit - High to Low",
+                "Line - Low to High",
+                "Line - High to Low",
+                "Operation - A to Z",
+                "Operation - Z to A",
+                "Machine - A to Z",
+                "Machine - Z to A"
+            };
+
             r.addView(title("Sort Reports",16));
+
             Spinner sortSpinner=new Spinner(this);
-            ArrayAdapter<String> sortAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,sortOptions);
+            ArrayAdapter<String> sortAdapter=new ArrayAdapter<>(
+                this,
+                android.R.layout.simple_spinner_dropdown_item,
+                sortOptions
+            );
             sortSpinner.setAdapter(sortAdapter);
 
             int selected=0;
             for(int i=0;i<sortOptions.length;i++){
-                if(sortOptions[i].equals(sortMode)){ selected=i; break; }
+                if(sortOptions[i].equals(sortMode)){
+                    selected=i;
+                    break;
+                }
             }
+
             sortSpinner.setSelection(selected,false);
             r.addView(sortSpinner);
 
             List<JSONObject> reports=new ArrayList<>();
-            for(int i=0;i<arr.length();i++) reports.add(arr.getJSONObject(i));
+            for(int i=0;i<arr.length();i++){
+                reports.add(arr.getJSONObject(i));
+            }
 
             Comparator<JSONObject> comparator;
+
             switch(sortMode){
-                case "Oldest":
+                case "Date - Oldest First":
                     comparator=(a,b)->compareDate(a.optString("date"),b.optString("date"));
                     break;
-                case "Emp No":
+                case "Emp No - Low to High":
                     comparator=(a,b)->naturalCompare(a.optString("empNo"),b.optString("empNo"));
                     break;
-                case "Name":
+                case "Emp No - High to Low":
+                    comparator=(a,b)->naturalCompare(b.optString("empNo"),a.optString("empNo"));
+                    break;
+                case "Name - A to Z":
                     comparator=(a,b)->a.optString("name").compareToIgnoreCase(b.optString("name"));
                     break;
-                case "Unit":
+                case "Name - Z to A":
+                    comparator=(a,b)->b.optString("name").compareToIgnoreCase(a.optString("name"));
+                    break;
+                case "Unit - Low to High":
                     comparator=(a,b)->naturalCompare(a.optString("unit"),b.optString("unit"));
                     break;
-                case "Line":
+                case "Unit - High to Low":
+                    comparator=(a,b)->naturalCompare(b.optString("unit"),a.optString("unit"));
+                    break;
+                case "Line - Low to High":
                     comparator=(a,b)->naturalCompare(a.optString("line"),b.optString("line"));
                     break;
-                case "Operation":
+                case "Line - High to Low":
+                    comparator=(a,b)->naturalCompare(b.optString("line"),a.optString("line"));
+                    break;
+                case "Operation - A to Z":
                     comparator=(a,b)->a.optString("operation").compareToIgnoreCase(b.optString("operation"));
                     break;
-                case "Machine":
+                case "Operation - Z to A":
+                    comparator=(a,b)->b.optString("operation").compareToIgnoreCase(a.optString("operation"));
+                    break;
+                case "Machine - A to Z":
                     comparator=(a,b)->a.optString("machine").compareToIgnoreCase(b.optString("machine"));
                     break;
-                case "Newest":
+                case "Machine - Z to A":
+                    comparator=(a,b)->b.optString("machine").compareToIgnoreCase(a.optString("machine"));
+                    break;
+                case "Date - Newest First":
                 default:
                     comparator=(a,b)->compareDate(b.optString("date"),a.optString("date"));
                     break;
             }
+
             Collections.sort(reports,comparator);
 
             sortSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
@@ -445,7 +521,9 @@ public class MainActivity extends Activity {
                 public void onNothingSelected(android.widget.AdapterView<?> p){}
             });
 
-            if(reports.size()==0) r.addView(title("No reports yet",16));
+            if(reports.size()==0){
+                r.addView(title("No reports yet",16));
+            }
 
             for(JSONObject o:reports){
                 LinearLayout c=new LinearLayout(this);
@@ -458,14 +536,22 @@ public class MainActivity extends Activity {
                 c.addView(title("Unit: "+o.optString("unit")+"   Line: "+o.optString("line"),14));
                 c.addView(title("Operation: "+o.optString("operation"),15));
                 c.addView(title("Machine: "+o.optString("machine"),14));
-                if(!o.optString("remarks").isEmpty()) c.addView(title("Remarks: "+o.optString("remarks"),14));
+
+                if(!o.optString("remarks").isEmpty()){
+                    c.addView(title("Remarks: "+o.optString("remarks"),14));
+                }
 
                 String storage=o.optString("storage","");
-                if(!storage.isEmpty()) c.addView(title("Video storage: "+storage+" ✓",14));
+                if(!storage.isEmpty()){
+                    c.addView(title("Video storage: "+storage+" ✓",14));
+                }
 
                 String vu=o.optString("video");
                 if(!vu.isEmpty()){
-                    Button play=button(storage.equals("Google Drive") ? "OPEN DRIVE VIDEO" : "PLAY VIDEO");
+                    Button play=button(storage.equals("Google Drive")
+                        ? "OPEN DRIVE VIDEO"
+                        : "OPEN VIDEO");
+
                     play.setOnClickListener(v->{
                         try{
                             Intent x=new Intent(Intent.ACTION_VIEW);
@@ -473,9 +559,10 @@ public class MainActivity extends Activity {
                             x.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
                             startActivity(x);
                         }catch(Exception ex){
-                            Toast.makeText(this,"Video unavailable. Check Drive app / internet.",Toast.LENGTH_LONG).show();
+                            Toast.makeText(this,"Video unavailable. Check storage access / internet.",Toast.LENGTH_LONG).show();
                         }
                     });
+
                     c.addView(play);
                 }
 
@@ -493,8 +580,9 @@ public class MainActivity extends Activity {
     int compareDate(String a,String b){
         try{
             SimpleDateFormat f=new SimpleDateFormat("dd-MM-yyyy HH:mm",Locale.getDefault());
-            Date da=f.parse(a), db=f.parse(b);
-            if(da==null||db==null) return a.compareToIgnoreCase(b);
+            Date da=f.parse(a);
+            Date db=f.parse(b);
+            if(da==null || db==null) return a.compareToIgnoreCase(b);
             return da.compareTo(db);
         }catch(Exception e){
             return a.compareToIgnoreCase(b);
@@ -505,11 +593,14 @@ public class MainActivity extends Activity {
         try{
             String ad=a.replaceAll("[^0-9]","");
             String bd=b.replaceAll("[^0-9]","");
-            if(!ad.isEmpty()&&!bd.isEmpty()){
-                long av=Long.parseLong(ad), bv=Long.parseLong(bd);
+
+            if(!ad.isEmpty() && !bd.isEmpty()){
+                long av=Long.parseLong(ad);
+                long bv=Long.parseLong(bd);
                 if(av!=bv) return Long.compare(av,bv);
             }
         }catch(Exception ignored){}
+
         return a.compareToIgnoreCase(b);
     }
 
