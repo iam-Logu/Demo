@@ -166,10 +166,24 @@ public class MainActivity extends Activity {
     String makeVideoFileName(){
         String eno=empNo==null ? "" : empNo.getText().toString().trim();
         String ename=empName==null ? "" : empName.getText().toString().trim();
-        String prefix=eno.isEmpty() ? "VideoReport" : eno;
-        if(!ename.isEmpty()) prefix+="_"+ename.replaceAll("[^a-zA-Z0-9_-]","_");
-        String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.getDefault()).format(new Date());
-        return prefix+"_"+stamp+".mp4";
+
+        String opName="Operation";
+        if(operation!=null && operation.getSelectedItemPosition()>=0){
+            opName=operations[operation.getSelectedItemPosition()];
+        }
+
+        String safeEmpNo=eno.isEmpty()
+            ? "NoEmp"
+            : eno.replaceAll("[^a-zA-Z0-9_-]","_");
+
+        String safeName=ename.isEmpty()
+            ? "NoName"
+            : ename.replaceAll("[^a-zA-Z0-9_-]","_");
+
+        String safeOperation=opName.replaceAll("[^a-zA-Z0-9_-]","_")
+                                   .replaceAll("_+","_");
+
+        return safeEmpNo+"_"+safeName+"_"+safeOperation+".mp4";
     }
 
     void chooseDriveDestinationForRecording(){
