@@ -306,6 +306,10 @@ public class MainActivity extends Activity {
     }
 
     void showHistory(){
+        showHistory(prefs.getString("sortMode","Newest"));
+    }
+
+    void showHistory(String sortMode){
         LinearLayout r=root();
         Button back=button("← ADD NEW REPORT");
         back.setOnClickListener(v->showForm());
@@ -317,11 +321,66 @@ public class MainActivity extends Activity {
             JSONArray arr=new JSONArray(prefs.getString("list","[]"));
             r.addView(title("Total reports: "+arr.length(),15));
 
-            if(arr.length()==0) r.addView(title("No reports yet",16));
+            final String[] sortOptions={"Newest","Oldest","Emp No","Name","Unit","Line","Operation","Machine"};
+            r.addView(title("Sort Reports",16));
+            Spinner sortSpinner=new Spinner(this);
+            ArrayAdapter<String> sortAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,sortOptions);
+            sortSpinner.setAdapter(sortAdapter);
 
-            for(int i=arr.length()-1;i>=0;i--){
-                JSONObject o=arr.getJSONObject(i);
+            int selected=0;
+            for(int i=0;i<sortOptions.length;i++){
+                if(sortOptions[i].equals(sortMode)){ selected=i; break; }
+            }
+            sortSpinner.setSelection(selected,false);
+            r.addView(sortSpinner);
 
+            List<JSONObject> reports=new ArrayList<>();
+            for(int i=0;i<arr.length();i++) reports.add(arr.getJSONObject(i));
+
+            Comparator<JSONObject> comparator;
+            switch(sortMode){
+                case "Oldest":
+                    comparator=(a,b)->compareDate(a.optString("date"),b.optString("date"));
+                    break;
+                case "Emp No":
+                    comparator=(a,b)->naturalCompare(a.optString("empNo"),b.optString("empNo"));
+                    break;
+                case "Name":
+                    comparator=(a,b)->a.optString("name").compareToIgnoreCase(b.optString("name"));
+                    break;
+                case "Unit":
+                    comparator=(a,b)->naturalCompare(a.optString("unit"),b.optString("unit"));
+                    break;
+                case "Line":
+                    comparator=(a,b)->naturalCompare(a.optString("line"),b.optString("line"));
+                    break;
+                case "Operation":
+                    comparator=(a,b)->a.optString("operation").compareToIgnoreCase(b.optString("operation"));
+                    break;
+                case "Machine":
+                    comparator=(a,b)->a.optString("machine").compareToIgnoreCase(b.optString("machine"));
+                    break;
+                case "Newest":
+                default:
+                    comparator=(a,b)->compareDate(b.optString("date"),a.optString("date"));
+                    break;
+            }
+            Collections.sort(reports,comparator);
+
+            sortSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
+                public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){
+                    String chosen=sortOptions[pos];
+                    if(!chosen.equals(sortMode)){
+                        prefs.edit().putString("sortMode",chosen).apply();
+                        showHistory(chosen);
+                    }
+                }
+                public void onNothingSelected(android.widget.AdapterView<?> p){}
+            });
+
+            if(reports.size()==0) r.addView(title("No reports yet",16));
+
+            for(JSONObject o:reports){
                 LinearLayout c=new LinearLayout(this);
                 c.setOrientation(LinearLayout.VERTICAL);
                 c.setPadding(18,18,18,18);
@@ -362,6 +421,29 @@ public class MainActivity extends Activity {
         }
 
         setContentView(scroll(r));
+    }
+
+    int compareDate(String a,String b){
+        try{
+            SimpleDateFormat f=new SimpleDateFormat("dd-MM-yyyy HH:mm",Locale.getDefault());
+            Date da=f.parse(a), db=f.parse(b);
+            if(da==null||db==null) return a.compareToIgnoreCase(b);
+            return da.compareTo(db);
+        }catch(Exception e){
+            return a.compareToIgnoreCase(b);
+        }
+    }
+
+    int naturalCompare(String a,String b){
+        try{
+            String ad=a.replaceAll("[^0-9]","");
+            String bd=b.replaceAll("[^0-9]","");
+            if(!ad.isEmpty()&&!bd.isEmpty()){
+                long av=Long.parseLong(ad), bv=Long.parseLong(bd);
+                if(av!=bv) return Long.compare(av,bv);
+            }
+        }catch(Exception ignored){}
+        return a.compareToIgnoreCase(b);
     }
 
     public static class GradientDrawableCompat{
