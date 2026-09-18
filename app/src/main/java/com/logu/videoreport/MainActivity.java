@@ -18,6 +18,7 @@ public class MainActivity extends Activity {
     static final int REQ_PICK = 12;
     static final int REQ_RECORD_DEST = 13;
     static final int REQ_PICK_DEST = 14;
+    static final int REQ_RECONNECT = 15;
 
     EditText empNo, empName, unit, line, remarks;
     Spinner operation;
@@ -27,6 +28,10 @@ public class MainActivity extends Activity {
     boolean videoStoredInDrive=false;
     boolean pendingSubmitAfterDriveSave=false;
     SharedPreferences prefs;
+    String pendingReconnectEmpNo="";
+    String pendingReconnectDate="";
+    String pendingReconnectEmployee="";
+    String pendingReconnectOperation="";
 
     final String[] operations = {
       "ELASTIC READY / BACK TACK","LABEL READY / RUNSTITCH OPERATIONS","NECK TAPE CLOSE","BADGE ATTACH / PATCH PKT ATT","V-RIB TACK","SLIT ATTACH / CLOSE","VELT POCKET MAKE","ZIP ATTACH/ TOPSTITCH","SIDE POCKET ATTACH","COLLAR ATTACH / CLOSE",
@@ -267,6 +272,26 @@ public class MainActivity extends Activity {
                         ? "Google Drive video selected ✓"
                         : "Video selected - will save to Drive on Submit");
                 }
+            }
+            return;
+        }
+
+
+        if(req==REQ_RECONNECT){
+            if(res==RESULT_OK && data!=null && data.getData()!=null){
+                Uri newUri=data.getData();
+                persistUriPermission(data,newUri,false);
+                updateReportVideoUri(pendingReconnectEmpNo,pendingReconnectDate,newUri);
+                Toast.makeText(this,"Drive video reconnected ✓",Toast.LENGTH_LONG).show();
+                playVideoInApp(
+                    newUri,
+                    pendingReconnectEmployee,
+                    pendingReconnectOperation,
+                    pendingReconnectEmpNo,
+                    pendingReconnectDate
+                );
+            }else{
+                Toast.makeText(this,"Reconnect cancelled",Toast.LENGTH_SHORT).show();
             }
             return;
         }
@@ -568,7 +593,9 @@ public class MainActivity extends Activity {
                         playVideoInApp(
                             Uri.parse(vu),
                             o.optString("empNo")+" - "+o.optString("name"),
-                            o.optString("operation")
+                            o.optString("operation"),
+                            o.optString("empNo"),
+                            o.optString("date")
                         );
                     });
 
@@ -586,7 +613,7 @@ public class MainActivity extends Activity {
         setContentView(scroll(r));
     }
 
-    void playVideoInApp(Uri uri,String employee,String operationName){
+    void playVideoInApp(Uri uri,String employee,String operationName,String empNoValue,String dateValue){
         LinearLayout r=root();
 
         Button back=button("← BACK TO REPORT HISTORY");
@@ -597,7 +624,7 @@ public class MainActivity extends Activity {
         r.addView(title(employee,18));
         r.addView(title(operationName,15));
 
-        TextView status=title("Loading video from Google Drive...",14);
+        TextView status=title("Preparing Google Drive video...",14);
         r.addView(status);
 
         VideoView vv=new VideoView(this);
@@ -615,18 +642,25 @@ public class MainActivity extends Activity {
 
         Button retry=button("RETRY VIDEO");
         retry.setVisibility(View.GONE);
-        retry.setOnClickListener(v->{
-            retry.setVisibility(View.GONE);
-            status.setText("Loading video...");
-            try{
-                vv.setVideoURI(uri);
-                vv.requestFocus();
-            }catch(Exception e){
-                status.setText("Unable to load video");
-                retry.setVisibility(View.VISIBLE);
-            }
-        });
         r.addView(retry);
+
+        Button reconnect=button("RECONNECT DRIVE VIDEO");
+        reconnect.setVisibility(View.GONE);
+        reconnect.setOnClickListener(v->{
+            pendingReconnectEmpNo=empNoValue;
+            pendingReconnectDate=dateValue;
+            pendingReconnectEmployee=employee;
+            pendingReconnectOperation=operationName;
+
+            Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.setType("video/*");
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
+                       Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            Toast.makeText(this,"Select this report's video from Google Drive",Toast.LENGTH_LONG).show();
+            startActivityForResult(i,REQ_RECONNECT);
+        });
+        r.addView(reconnect);
 
         setContentView(scroll(r));
 
@@ -637,23 +671,106 @@ public class MainActivity extends Activity {
         });
 
         vv.setOnErrorListener((mp,what,extra)->{
-            status.setText("Could not read this Drive video. Check internet and Drive access.");
+            status.setText("Video could not be played from the temporary copy.");
             retry.setVisibility(View.VISIBLE);
-            Toast.makeText(
-                this,
-                "Could not play the Drive video. Please check Google Drive sync / internet.",
-                Toast.LENGTH_LONG
-            ).show();
+            reconnect.setVisibility(View.VISIBLE);
             return true;
         });
 
-        try{
-            vv.setVideoURI(uri);
-            vv.requestFocus();
+        Runnable loadVideo=()->{
+            retry.setVisibility(View.GONE);
+            reconnect.setVisibility(View.GONE);
+            status.setText("Downloading video from Google Drive...");
+
+            new Thread(()->{
+                try{
+                    File local=copyDriveVideoToCache(uri);
+                    runOnUiThread(()->{
+                        try{
+                            status.setText("Opening video...");
+                            vv.setVideoPath(local.getAbsolutePath());
+                            vv.requestFocus();
+                        }catch(Exception e){
+                            status.setText("Unable to open temporary video.");
+                            retry.setVisibility(View.VISIBLE);
+                            reconnect.setVisibility(View.VISIBLE);
+                        }
+                    });
+                }catch(Exception e){
+                    runOnUiThread(()->{
+                        status.setText("Drive access expired or video unavailable.");
+                        retry.setVisibility(View.VISIBLE);
+                        reconnect.setVisibility(View.VISIBLE);
+                        Toast.makeText(
+                            this,
+                            "Please tap RECONNECT DRIVE VIDEO and select the same video from Google Drive.",
+                            Toast.LENGTH_LONG
+                        ).show();
+                    });
+                }
+            }).start();
+        };
+
+        retry.setOnClickListener(v->loadVideo.run());
+        loadVideo.run();
+    }
+
+    File copyDriveVideoToCache(Uri uri) throws Exception{
+        clearVideoCache();
+
+        File temp=File.createTempFile("drive_play_",".mp4",getCacheDir());
+
+        try(InputStream in=getContentResolver().openInputStream(uri);
+            OutputStream out=new FileOutputStream(temp)){
+            if(in==null) throw new IOException("Cannot read Drive file");
+
+            byte[] buf=new byte[1024*128];
+            int n;
+            while((n=in.read(buf))>0){
+                out.write(buf,0,n);
+            }
+            out.flush();
         }catch(Exception e){
-            status.setText("Unable to open this video.");
-            retry.setVisibility(View.VISIBLE);
+            try{ temp.delete(); }catch(Exception ignored){}
+            throw e;
         }
+
+        if(temp.length()==0){
+            temp.delete();
+            throw new IOException("Drive video is empty");
+        }
+
+        return temp;
+    }
+
+    void clearVideoCache(){
+        try{
+            File[] files=getCacheDir().listFiles();
+            if(files==null) return;
+            for(File f:files){
+                if(f.getName().startsWith("drive_play_")){
+                    try{ f.delete(); }catch(Exception ignored){}
+                }
+            }
+        }catch(Exception ignored){}
+    }
+
+    void updateReportVideoUri(String empNoValue,String dateValue,Uri newUri){
+        try{
+            JSONArray arr=new JSONArray(prefs.getString("list","[]"));
+
+            for(int i=0;i<arr.length();i++){
+                JSONObject o=arr.getJSONObject(i);
+                if(o.optString("empNo").equals(empNoValue) &&
+                   o.optString("date").equals(dateValue)){
+                    o.put("video",newUri.toString());
+                    o.put("storage","Google Drive");
+                    break;
+                }
+            }
+
+            prefs.edit().putString("list",arr.toString()).commit();
+        }catch(Exception ignored){}
     }
 
     int compareDate(String a,String b){
