@@ -562,19 +562,14 @@ public class MainActivity extends Activity {
 
                 String vu=o.optString("video");
                 if(!vu.isEmpty()){
-                    Button play=button(storage.equals("Google Drive")
-                        ? "OPEN DRIVE VIDEO"
-                        : "OPEN VIDEO");
+                    Button play=button("PLAY VIDEO");
 
                     play.setOnClickListener(v->{
-                        try{
-                            Intent x=new Intent(Intent.ACTION_VIEW);
-                            x.setDataAndType(Uri.parse(vu),"video/*");
-                            x.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                            startActivity(x);
-                        }catch(Exception ex){
-                            Toast.makeText(this,"Video unavailable. Check storage access / internet.",Toast.LENGTH_LONG).show();
-                        }
+                        playVideoInApp(
+                            Uri.parse(vu),
+                            o.optString("empNo")+" - "+o.optString("name"),
+                            o.optString("operation")
+                        );
                     });
 
                     c.addView(play);
@@ -589,6 +584,76 @@ public class MainActivity extends Activity {
         }
 
         setContentView(scroll(r));
+    }
+
+    void playVideoInApp(Uri uri,String employee,String operationName){
+        LinearLayout r=root();
+
+        Button back=button("← BACK TO REPORT HISTORY");
+        back.setOnClickListener(v->showHistory());
+        r.addView(back);
+
+        r.addView(title("VIDEO PLAYER",24));
+        r.addView(title(employee,18));
+        r.addView(title(operationName,15));
+
+        TextView status=title("Loading video from Google Drive...",14);
+        r.addView(status);
+
+        VideoView vv=new VideoView(this);
+        MediaController controls=new MediaController(this);
+        controls.setAnchorView(vv);
+        vv.setMediaController(controls);
+
+        int h=(int)(getResources().getDisplayMetrics().density*360);
+        LinearLayout.LayoutParams vp=new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            h
+        );
+        vp.setMargins(0,12,0,12);
+        r.addView(vv,vp);
+
+        Button retry=button("RETRY VIDEO");
+        retry.setVisibility(View.GONE);
+        retry.setOnClickListener(v->{
+            retry.setVisibility(View.GONE);
+            status.setText("Loading video...");
+            try{
+                vv.setVideoURI(uri);
+                vv.requestFocus();
+            }catch(Exception e){
+                status.setText("Unable to load video");
+                retry.setVisibility(View.VISIBLE);
+            }
+        });
+        r.addView(retry);
+
+        setContentView(scroll(r));
+
+        vv.setOnPreparedListener(mp->{
+            status.setText("Video ready ✓");
+            mp.setLooping(false);
+            vv.start();
+        });
+
+        vv.setOnErrorListener((mp,what,extra)->{
+            status.setText("Could not read this Drive video. Check internet and Drive access.");
+            retry.setVisibility(View.VISIBLE);
+            Toast.makeText(
+                this,
+                "Could not play the Drive video. Please check Google Drive sync / internet.",
+                Toast.LENGTH_LONG
+            ).show();
+            return true;
+        });
+
+        try{
+            vv.setVideoURI(uri);
+            vv.requestFocus();
+        }catch(Exception e){
+            status.setText("Unable to open this video.");
+            retry.setVisibility(View.VISIBLE);
+        }
     }
 
     int compareDate(String a,String b){
