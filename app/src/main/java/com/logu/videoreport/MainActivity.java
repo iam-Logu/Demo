@@ -21,6 +21,7 @@ public class MainActivity extends Activity {
     Spinner operation;
     TextView machine, videoLabel, driveLabel;
     Uri videoUri, cameraUri;
+    boolean videoStoredInDrive=false;
     SharedPreferences prefs;
 
     final String[] operations = {
@@ -71,6 +72,7 @@ public class MainActivity extends Activity {
     void showForm(){
         videoUri=null;
         cameraUri=null;
+        videoStoredInDrive=false;
 
         LinearLayout r=root();
         TextView h=title("VIDEO REPORT - DRIVE VERSION",24);
@@ -126,7 +128,7 @@ public class MainActivity extends Activity {
         record.setOnClickListener(v->recordVideo());
         pick.setOnClickListener(v->pickVideo());
 
-        Button submit=button("UPLOAD VIDEO + SUBMIT REPORT");
+        Button submit=button("SUBMIT REPORT");
         submit.setOnClickListener(v->uploadAndSave());
         r.addView(submit);
 
@@ -164,6 +166,12 @@ public class MainActivity extends Activity {
     }
 
     void recordVideo(){
+        String folder=prefs.getString("driveFolder","");
+        if(folder.isEmpty()){
+            Toast.makeText(this,"First select your Google Drive folder",Toast.LENGTH_LONG).show();
+            selectDriveFolder();
+            return;
+        }
         try{
             ContentValues values=new ContentValues();
             values.put(MediaStore.Video.Media.DISPLAY_NAME,"VideoReport_"+System.currentTimeMillis()+".mp4");
@@ -196,20 +204,65 @@ public class MainActivity extends Activity {
 
         if(req==REQ_PICK && res==RESULT_OK && data!=null && data.getData()!=null){
             videoUri=data.getData();
+            videoStoredInDrive=false;
             try{ getContentResolver().takePersistableUriPermission(videoUri,Intent.FLAG_GRANT_READ_URI_PERMISSION); }catch(Exception ignored){}
-            if(videoLabel!=null) videoLabel.setText("Video selected ✓");
+            if(videoLabel!=null) videoLabel.setText("Video selected - will upload on Submit");
             return;
         }
 
         if(req==REQ_RECORD){
             if(res==RESULT_OK && cameraUri!=null){
-                videoUri=cameraUri;
-                if(videoLabel!=null) videoLabel.setText("Recorded video selected ✓");
+                uploadRecordedVideoToDrive(cameraUri);
             }else if(cameraUri!=null){
                 try{ getContentResolver().delete(cameraUri,null,null); }catch(Exception ignored){}
                 cameraUri=null;
             }
         }
+    }
+
+    void uploadRecordedVideoToDrive(Uri localVideo){
+        final String folder=prefs.getString("driveFolder","");
+        if(folder.isEmpty()){
+            Toast.makeText(this,"Drive folder not selected",Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        final ProgressDialog pd=new ProgressDialog(this);
+        pd.setTitle("Saving recording to Google Drive");
+        pd.setMessage("Uploading recorded video...");
+        pd.setCancelable(false);
+        pd.show();
+
+        new Thread(()->{
+            try{
+                String eno=empNo==null ? "" : empNo.getText().toString().trim();
+                String ename=empName==null ? "" : empName.getText().toString().trim();
+                String prefix=(eno.isEmpty() ? "Recorded" : eno);
+                if(!ename.isEmpty()) prefix+="_"+ename.replaceAll("[^a-zA-Z0-9_-]","_");
+                String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.getDefault()).format(new Date());
+                Uri driveUri=copyVideoToDrive(localVideo,Uri.parse(folder),prefix+"_"+stamp+".mp4");
+
+                try{ getContentResolver().delete(localVideo,null,null); }catch(Exception ignored){}
+
+                videoUri=driveUri;
+                videoStoredInDrive=true;
+                cameraUri=null;
+
+                runOnUiThread(()->{
+                    pd.dismiss();
+                    if(videoLabel!=null) videoLabel.setText("Recorded video saved to Google Drive ✓");
+                    Toast.makeText(this,"Recording saved to Google Drive ✓",Toast.LENGTH_LONG).show();
+                });
+            }catch(Exception e){
+                runOnUiThread(()->{
+                    pd.dismiss();
+                    videoUri=localVideo;
+                    videoStoredInDrive=false;
+                    if(videoLabel!=null) videoLabel.setText("Drive upload failed - local recording kept");
+                    Toast.makeText(this,"Drive upload failed: "+e.getMessage(),Toast.LENGTH_LONG).show();
+                });
+            }
+        }).start();
     }
 
     void uploadAndSave(){
@@ -236,10 +289,21 @@ public class MainActivity extends Activity {
             return;
         }
 
+        if(videoStoredInDrive){
+            try{
+                saveReportRecord(eno,ename,eunit,eline,eremarks,op,videoUri);
+                Toast.makeText(this,"Report saved ✓",Toast.LENGTH_LONG).show();
+                showHistory();
+            }catch(Exception e){
+                Toast.makeText(this,"Could not save report: "+e.getMessage(),Toast.LENGTH_LONG).show();
+            }
+            return;
+        }
+
         final Uri src=videoUri;
         final ProgressDialog pd=new ProgressDialog(this);
         pd.setTitle("Uploading to Google Drive");
-        pd.setMessage("Please keep the app open until upload completes.");
+        pd.setMessage("Uploading selected video...");
         pd.setCancelable(false);
         pd.show();
 
@@ -249,24 +313,7 @@ public class MainActivity extends Activity {
                 String stamp=new SimpleDateFormat("yyyyMMdd_HHmmss",Locale.getDefault()).format(new Date());
                 String fileName=eno+"_"+safeName+"_"+stamp+".mp4";
                 Uri driveUri=copyVideoToDrive(src,Uri.parse(folder),fileName);
-
-                JSONObject o=new JSONObject();
-                o.put("empNo",eno);
-                o.put("name",ename);
-                o.put("unit",eunit);
-                o.put("line",eline);
-                o.put("operation",operations[op]);
-                o.put("machine",machineFor(op));
-                o.put("remarks",eremarks);
-                o.put("date",new SimpleDateFormat("dd-MM-yyyy HH:mm",Locale.getDefault()).format(new Date()));
-                o.put("video",driveUri.toString());
-                o.put("storage","Google Drive");
-
-                synchronized(MainActivity.class){
-                    JSONArray arr=new JSONArray(prefs.getString("list","[]"));
-                    arr.put(o);
-                    prefs.edit().putString("list",arr.toString()).commit();
-                }
+                saveReportRecord(eno,ename,eunit,eline,eremarks,op,driveUri);
 
                 runOnUiThread(()->{
                     pd.dismiss();
@@ -280,6 +327,26 @@ public class MainActivity extends Activity {
                 });
             }
         }).start();
+    }
+
+    void saveReportRecord(String eno,String ename,String eunit,String eline,String eremarks,int op,Uri driveUri) throws Exception{
+        JSONObject o=new JSONObject();
+        o.put("empNo",eno);
+        o.put("name",ename);
+        o.put("unit",eunit);
+        o.put("line",eline);
+        o.put("operation",operations[op]);
+        o.put("machine",machineFor(op));
+        o.put("remarks",eremarks);
+        o.put("date",new SimpleDateFormat("dd-MM-yyyy HH:mm",Locale.getDefault()).format(new Date()));
+        o.put("video",driveUri.toString());
+        o.put("storage","Google Drive");
+
+        synchronized(MainActivity.class){
+            JSONArray arr=new JSONArray(prefs.getString("list","[]"));
+            arr.put(o);
+            prefs.edit().putString("list",arr.toString()).commit();
+        }
     }
 
     Uri copyVideoToDrive(Uri source,Uri treeUri,String fileName) throws Exception{
