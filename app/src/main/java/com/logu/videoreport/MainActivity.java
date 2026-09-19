@@ -323,10 +323,14 @@ public class MainActivity extends Activity {
     }
 
     void showHistory(){
-        showHistory(prefs.getString("sortMode","Date - Newest First"));
+        showHistory(prefs.getString("sortMode","Date - Newest First"),"");
     }
 
     void showHistory(String sortMode){
+        showHistory(sortMode,"");
+    }
+
+    void showHistory(String sortMode,String searchEmp){
         LinearLayout r=root();
 
         Button back=button("← ADD NEW REPORT");
@@ -337,6 +341,25 @@ public class MainActivity extends Activity {
         try{
             JSONArray arr=new JSONArray(prefs.getString("list","[]"));
             r.addView(title("Total reports: "+arr.length(),15));
+
+            r.addView(title("Search Emp No",16));
+            EditText searchBox=field("Enter Emp No");
+            searchBox.setText(searchEmp);
+            r.addView(searchBox);
+
+            LinearLayout searchRow=new LinearLayout(this);
+            searchRow.setOrientation(LinearLayout.HORIZONTAL);
+            Button searchBtn=button("SEARCH");
+            Button clearBtn=button("CLEAR");
+            searchRow.addView(searchBtn,new LinearLayout.LayoutParams(0,-2,1));
+            searchRow.addView(clearBtn,new LinearLayout.LayoutParams(0,-2,1));
+            r.addView(searchRow);
+
+            searchBtn.setOnClickListener(v->showHistory(
+                sortMode,
+                searchBox.getText().toString().trim()
+            ));
+            clearBtn.setOnClickListener(v->showHistory(sortMode,""));
 
             final String[] sortOptions={
                 "Date - Newest First","Date - Oldest First",
@@ -358,15 +381,25 @@ public class MainActivity extends Activity {
             r.addView(sortSpinner);
 
             List<JSONObject> reports=new ArrayList<>();
-            for(int i=0;i<arr.length();i++)reports.add(arr.getJSONObject(i));
+            String searchKey=searchEmp==null?"":searchEmp.trim().toLowerCase(Locale.ROOT);
+            for(int i=0;i<arr.length();i++){
+                JSONObject item=arr.getJSONObject(i);
+                if(searchKey.isEmpty() ||
+                   item.optString("empNo").toLowerCase(Locale.ROOT).contains(searchKey)){
+                    reports.add(item);
+                }
+            }
             Collections.sort(reports,reportComparator(sortMode));
+            if(!searchKey.isEmpty()){
+                r.addView(title("Search results: "+reports.size(),14));
+            }
 
             sortSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){
                 public void onItemSelected(android.widget.AdapterView<?> p,View v,int pos,long id){
                     String chosen=sortOptions[pos];
                     if(!chosen.equals(sortMode)){
                         prefs.edit().putString("sortMode",chosen).apply();
-                        showHistory(chosen);
+                        showHistory(chosen,searchEmp);
                     }
                 }
                 public void onNothingSelected(android.widget.AdapterView<?> p){}
@@ -399,12 +432,14 @@ public class MainActivity extends Activity {
                     ));
                     c.addView(play);
 
-                    if(drive.isEmpty()){
-                        Button backup=button("BACKUP TO GOOGLE DRIVE");
-                        backup.setOnClickListener(v->startDriveBackup(o,local));
-                        c.addView(backup);
-                    }else{
-                        c.addView(title("Google Drive backup: ✓",14));
+                    Button backup=button(drive.isEmpty()
+                        ? "BACKUP TO GOOGLE DRIVE"
+                        : "BACKUP AGAIN TO GOOGLE DRIVE");
+                    backup.setOnClickListener(v->startDriveBackup(o,local));
+                    c.addView(backup);
+
+                    if(!drive.isEmpty()){
+                        c.addView(title("Previous Drive backup reference: ✓",14));
                     }
                 }else{
                     Button restore=button("RESTORE OLD VIDEO");
@@ -424,21 +459,38 @@ public class MainActivity extends Activity {
     }
 
     void startDriveBackup(JSONObject o,String local){
-        pendingBackupEmp=o.optString("empNo");
-        pendingBackupDate=o.optString("date");
-        pendingBackupLocal=local;
-        pendingBackupName=
-            safe(o.optString("empNo"),"NoEmp")+"_"+
-            safe(o.optString("name"),"NoName")+"_"+
-            safe(o.optString("operation"),"Operation")+".mp4";
+        try{
+            Uri video=Uri.parse(local);
 
-        Intent i=new Intent(Intent.ACTION_CREATE_DOCUMENT);
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.setType("video/mp4");
-        i.putExtra(Intent.EXTRA_TITLE,pendingBackupName);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
-        Toast.makeText(this,"Choose Google Drive on the Save screen",Toast.LENGTH_LONG).show();
-        startActivityForResult(i,REQ_BACKUP);
+            Intent i=new Intent(Intent.ACTION_SEND);
+            i.setType("video/mp4");
+            i.putExtra(Intent.EXTRA_STREAM,video);
+            i.setClipData(ClipData.newRawUri("video",video));
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            i.setPackage("com.google.android.apps.docs");
+
+            if(i.resolveActivity(getPackageManager())!=null){
+                Toast.makeText(
+                    this,
+                    "Google Drive opened. Select the folder and tap Save.",
+                    Toast.LENGTH_LONG
+                ).show();
+                startActivity(i);
+            }else{
+                Intent fallback=new Intent(Intent.ACTION_SEND);
+                fallback.setType("video/mp4");
+                fallback.putExtra(Intent.EXTRA_STREAM,video);
+                fallback.setClipData(ClipData.newRawUri("video",video));
+                fallback.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                startActivity(Intent.createChooser(fallback,"Backup video"));
+            }
+        }catch(Exception e){
+            Toast.makeText(
+                this,
+                "Could not open Google Drive. Please check the Drive app.",
+                Toast.LENGTH_LONG
+            ).show();
+        }
     }
 
     void backupReportToDrive(Uri dest){
